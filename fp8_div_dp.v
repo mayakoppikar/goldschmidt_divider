@@ -1,4 +1,7 @@
-module fp8_div_dp (
+module fp8_div_dp #(
+    parameter EARLY_EXIT = 1   // 1: pass count from divisor + power-of-two bypass
+                               // 0: fixed 3 passes (baseline for comparison)
+) (
     input        clk,
     input        rst_n,
     input  [7:0] a,            // dividend
@@ -11,10 +14,10 @@ module fp8_div_dp (
     input        out_en,
     output       is_special,
     output       underflow,
+    output reg [1:0] iters,    // Goldschmidt passes needed: 0 (bypass), 1, 2 or 3
     output reg [7:0] result
 );
 
-//unpack
     wire              sign_a, sign_b;
     wire signed [4:0] exp_a, exp_b;
     wire [3:0]        sig_a, sig_b;
@@ -25,7 +28,6 @@ module fp8_div_dp (
     fp8_unpack u_unpack_b (.x(b), .sign(sign_b), .exp_adj(exp_b), .sig(sig_b),
                            .is_nan(nan_b), .is_zero(zero_b));
 
-    // sign and provisional exponent of the quotient
     wire              sign_q;
     wire signed [5:0] exp_q;
 
@@ -56,12 +58,33 @@ module fp8_div_dp (
         end
     end
 
-//gs core
     wire [8:0] n_q;
 
-    gs_core u_core (.clk(clk), .rst_n(rst_n), .load(load), .step(step),
+    // Pass count depends only on the divisor significand sig_b = 1.mmm, because the
+    // D sequence never involves the dividend. D (Q1.8) reaches >= 255 (within 1/256 of
+    // 1.0) after: 1.000 -> bypass (quotient is exact), 1.125 to 1.375 -> 3 passes,
+    // 1.5 to 1.75 -> 2 passes, 1.875 -> 1 pass.
+    // sig_b comes from b, which fp8_div holds stable for the whole operation.
+    wire pow2_div = EARLY_EXIT && (sig_b[2:0] == 3'b000);
+
+    always @(*) begin
+        if (!EARLY_EXIT) iters = 2'd3;
+        else begin
+            case (sig_b[2:0])
+                3'b000:                   iters = 2'd0;   // power-of-two divisor: bypass
+                3'b001, 3'b010, 3'b011:   iters = 2'd3;
+                3'b100, 3'b101, 3'b110:   iters = 2'd2;
+                default:                  iters = 2'd1;   // 3'b111
+            endcase
+        end
+    end
+
+    gs_core u_core (.clk(clk), .rst_n(rst_n), .load(load), .step(step), .bypass(pow2_div),
                     .sig_a(sig_a), .sig_b(sig_b), .n_q(n_q));
 
+    // ------------------------------------------------------------------
+    // Normalize / denormalize (one fp8_norm used for both passes)
+    // ------------------------------------------------------------------
     reg  [8:0]        n_w;
     reg  signed [5:0] exp_w;
 
@@ -83,7 +106,9 @@ module fp8_div_dp (
         end
     end
 
-//round
+    // ------------------------------------------------------------------
+    // Round
+    // ------------------------------------------------------------------
     reg  [2:0]        frac_r;
     reg  signed [5:0] exp_r;
     wire [2:0]        round_frac;
@@ -101,7 +126,9 @@ module fp8_div_dp (
         end
     end
 
-//pack
+    // ------------------------------------------------------------------
+    // Pack: result register holds the answer through DONE
+    // ------------------------------------------------------------------
     wire [7:0] packed_result;
 
     fp8_pack u_pack (.sign(sign_r), .exp_in(exp_r), .frac_in(frac_r),
