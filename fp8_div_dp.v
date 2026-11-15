@@ -1,6 +1,8 @@
 module fp8_div_dp #(
-    parameter EARLY_EXIT = 1   // 1: pass count from divisor + power-of-two bypass
+    parameter EARLY_EXIT = 1,  // 1: pass count from divisor + power-of-two bypass
                                // 0: fixed 3 passes (baseline for comparison)
+    parameter CORRECTION = 1   // 1: build the exact remainder correction in gs_core
+                               // 0: leave that hardware out
 ) (
     input        clk,
     input        rst_n,
@@ -8,6 +10,7 @@ module fp8_div_dp #(
     input  [7:0] b,            // divisor
     input        load,
     input        step,
+    input        corr_en,     // exact remainder correction (CORRECT state)
     input        norm_en,
     input        denorm_en,
     input        round_en,
@@ -18,6 +21,9 @@ module fp8_div_dp #(
     output reg [7:0] result
 );
 
+    // ------------------------------------------------------------------
+    // Front end: unpack A and B
+    // ------------------------------------------------------------------
     wire              sign_a, sign_b;
     wire signed [4:0] exp_a, exp_b;
     wire [3:0]        sig_a, sig_b;
@@ -28,18 +34,26 @@ module fp8_div_dp #(
     fp8_unpack u_unpack_b (.x(b), .sign(sign_b), .exp_adj(exp_b), .sig(sig_b),
                            .is_nan(nan_b), .is_zero(zero_b));
 
+    // sign and provisional exponent of the quotient
     wire              sign_q;
     wire signed [5:0] exp_q;
 
     fp8_exp_unit u_exp (.sign_a(sign_a), .sign_b(sign_b), .exp_a(exp_a), .exp_b(exp_b),
                         .sign_q(sign_q), .exp_q(exp_q));
 
-//special case
+    // ------------------------------------------------------------------
+    // Special-case logic
+    //   NaN in either operand, or divisor = 0 (includes 0/0) -> NaN (E4M3 has no infinity)
+    //   dividend = 0 with a valid nonzero divisor            -> signed zero
+    // ------------------------------------------------------------------
     wire force_nan_c  = nan_a | nan_b | zero_b;
     wire force_zero_c = zero_a & ~force_nan_c;
 
     assign is_special = force_nan_c | force_zero_c;
 
+    // ------------------------------------------------------------------
+    // Registers captured at load
+    // ------------------------------------------------------------------
     reg              sign_r;
     reg signed [5:0] exp_q_r;
     reg              force_nan_r, force_zero_r;
@@ -58,13 +72,10 @@ module fp8_div_dp #(
         end
     end
 
+
     wire [8:0] n_q;
 
-    // Pass count depends only on the divisor significand sig_b = 1.mmm, because the
-    // D sequence never involves the dividend. D (Q1.8) reaches >= 255 (within 1/256 of
-    // 1.0) after: 1.000 -> bypass (quotient is exact), 1.125 to 1.375 -> 3 passes,
-    // 1.5 to 1.75 -> 2 passes, 1.875 -> 1 pass.
-    // sig_b comes from b, which fp8_div holds stable for the whole operation.
+
     wire pow2_div = EARLY_EXIT && (sig_b[2:0] == 3'b000);
 
     always @(*) begin
@@ -79,7 +90,8 @@ module fp8_div_dp #(
         end
     end
 
-    gs_core u_core (.clk(clk), .rst_n(rst_n), .load(load), .step(step), .bypass(pow2_div),
+    gs_core #(.CORRECTION(CORRECTION)) u_core (.clk(clk), .rst_n(rst_n), .load(load), .step(step), .correct(corr_en),
+                    .bypass(pow2_div),
                     .sig_a(sig_a), .sig_b(sig_b), .n_q(n_q));
 
     // ------------------------------------------------------------------
