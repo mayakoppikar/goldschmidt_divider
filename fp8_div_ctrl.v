@@ -1,24 +1,6 @@
-// fp8_div_ctrl: 9-state FSM and pass counter for the FP8 Goldschmidt divider.
-// Moore outputs: each enable is high for the whole state and the datapath latches
-// at the end of that cycle.
-//
-//   IDLE              wait for start
-//   UNPACK            load = 1; is_special -> OUTPUT_SPECIAL;
-//                     iters == 0 (power-of-two divisor) -> NORMALIZE_RESULT;
-//                     otherwise -> ITERATE
-//   ITERATE           step = 1, repeated `iters` times (pass counter)
-//   NORMALIZE_RESULT  norm_en = 1; underflow -> DENORMALIZE, else -> ROUND
-//   DENORMALIZE       denorm_en = 1
-//   ROUND             round_en = 1
-//   PACK              out_en = 1
-//   OUTPUT_SPECIAL    out_en = 1 (fp8_pack forces NaN or zero)
-//   DONE              valid = 1, hold until ack
-//
-// iters (0..3) comes from fp8_div_dp and depends only on the divisor significand:
-//   0 = power-of-two divisor (bypass), 1, 2 or 3 Goldschmidt passes.
-// Latency start -> DONE (normal path): UNPACK 1 + iters + NORMALIZE 1 + ROUND 1 + PACK 1
-//   = iters + 4 cycles; +1 if DENORMALIZE; special cases take 2.
-module fp8_div_ctrl (
+module fp8_div_ctrl #(
+    parameter CORRECTION = 1
+) (
     input        clk,
     input        rst_n,
     input        start,
@@ -28,6 +10,7 @@ module fp8_div_ctrl (
     input  [1:0] iters,
     output reg   load,
     output reg   step,
+    output reg   corr_en,
     output reg   norm_en,
     output reg   denorm_en,
     output reg   round_en,
@@ -38,12 +21,13 @@ module fp8_div_ctrl (
     localparam [3:0] S_IDLE    = 4'd0,
                      S_UNPACK  = 4'd1,
                      S_ITERATE = 4'd2,
-                     S_NORM    = 4'd3,   // NORMALIZE_RESULT
+                     S_NORM    = 4'd3,   // NORMALIZE
                      S_DENORM  = 4'd4,   // DENORMALIZE
                      S_ROUND   = 4'd5,
                      S_PACK    = 4'd6,
                      S_SPECIAL = 4'd7,   // OUTPUT_SPECIAL
-                     S_DONE    = 4'd8;
+                     S_DONE    = 4'd8,
+                     S_CORRECT = 4'd9;
 
     reg [3:0] state, next_state;
     reg [3:0] cnt;                       // pass counter
@@ -64,9 +48,11 @@ module fp8_div_ctrl (
         case (state)
             S_IDLE:    if (start) next_state = S_UNPACK;
             S_UNPACK:  if (is_special)         next_state = S_SPECIAL;
-                       else if (iters == 2'd0) next_state = S_NORM;      // bypass: no passes
+                       else if (iters == 2'd0) next_state = S_NORM;      // bypass: exact, no passes
                        else                    next_state = S_ITERATE;
-            S_ITERATE: if ((cnt + 4'd1) == {2'b00, iters}) next_state = S_NORM;  // last pass
+            S_ITERATE: if ((cnt + 4'd1) == {2'b00, iters})                // last pass
+                           next_state = CORRECTION ? S_CORRECT : S_NORM;
+            S_CORRECT: next_state = S_NORM;
             S_NORM:    next_state = underflow ? S_DENORM : S_ROUND;
             S_DENORM:  next_state = S_ROUND;
             S_ROUND:   next_state = S_PACK;
@@ -80,6 +66,7 @@ module fp8_div_ctrl (
     always @(*) begin
         load      = 1'b0;
         step      = 1'b0;
+        corr_en   = 1'b0;
         norm_en   = 1'b0;
         denorm_en = 1'b0;
         round_en  = 1'b0;
@@ -88,6 +75,7 @@ module fp8_div_ctrl (
         case (state)
             S_UNPACK:  load      = 1'b1;
             S_ITERATE: step      = 1'b1;
+            S_CORRECT: corr_en   = 1'b1;
             S_NORM:    norm_en   = 1'b1;
             S_DENORM:  denorm_en = 1'b1;
             S_ROUND:   round_en  = 1'b1;
