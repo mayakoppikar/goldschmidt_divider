@@ -1,6 +1,7 @@
 
 module fp8_div #(
-    parameter ITER = 3                 // Goldschmidt passes
+    parameter EARLY_EXIT = 1,
+    parameter CORRECTION = 1   // 1: exact remainder correction (CORRECT state, +1 cycle)
 ) (
     input        clk,
     input        rst_n,
@@ -12,9 +13,8 @@ module fp8_div #(
     output [7:0] result
 );
 
-    // ---------------- operand capture ----------------
     reg [7:0] a_r, b_r;
-    reg       busy;                    // set when an operation is accepted, cleared on ack
+    reg       busy;                  
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -33,18 +33,21 @@ module fp8_div #(
     end
 
     // ---------------- control <-> datapath ----------------
-    wire load, step, norm_en, denorm_en, round_en, out_en;
+    wire load, step, corr_en, norm_en, denorm_en, round_en, out_en;
     wire is_special, underflow;
+    wire [1:0] iters;
 
-    fp8_div_ctrl #(.ITER(ITER)) u_ctrl (
+    fp8_div_ctrl #(.CORRECTION(CORRECTION)) u_ctrl (
         .clk       (clk),
         .rst_n     (rst_n),
         .start     (start),
         .ack       (ack),
         .is_special(is_special),
         .underflow (underflow),
+        .iters     (iters),
         .load      (load),
         .step      (step),
+        .corr_en   (corr_en),
         .norm_en   (norm_en),
         .denorm_en (denorm_en),
         .round_en  (round_en),
@@ -52,19 +55,21 @@ module fp8_div #(
         .valid     (valid)
     );
 
-    fp8_div_dp u_dp (
+    fp8_div_dp #(.EARLY_EXIT(EARLY_EXIT), .CORRECTION(CORRECTION)) u_dp (
         .clk       (clk),
         .rst_n     (rst_n),
         .a         (a_r),
         .b         (b_r),
         .load      (load),
         .step      (step),
+        .corr_en   (corr_en),
         .norm_en   (norm_en),
         .denorm_en (denorm_en),
         .round_en  (round_en),
         .out_en    (out_en),
         .is_special(is_special),
         .underflow (underflow),
+        .iters     (iters),
         .result    (result)
     );
 
